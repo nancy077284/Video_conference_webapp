@@ -85,35 +85,7 @@ npm run dev
 
 ---
 
-## Deploying on Render
 
-1. Log in to your **[Render Dashboard](https://dashboard.render.com)**.
-2. Click **New +** and select **Web Service**.
-3. Connect your GitHub repository (`nancy077284/Video_conference_webapp`).
-4. Configure the service settings:
-   - **Name**: `video-conference-webapp`
-   - **Environment**: `Node`
-   - **Build Command**: `npm run install:all && npm run build`
-   - **Start Command**: `npm start`
-5. In **Environment Variables**, add:
-   - `MONGODB_URI`: Your MongoDB Atlas connection string (`mongodb+srv://...`)
-   - `JWT_SECRET`: Any random secret string (e.g. `your_strong_jwt_secret_key`)
-   - `NODE_ENV`: `production`
-6. Click **Create Web Service**. Render will install, build, and deploy your live web app URL (e.g., `https://video-conference-webapp.onrender.com`).
-
----
-
-## Deploying on Replit
-
-1. Create a new Repl on **[Replit](https://replit.com)** and choose **"Import from GitHub"**.
-2. Paste your repository link and import it.
-3. In Replit, navigate to **Tools** -> **Secrets (Environment Variables)** and add:
-   - `MONGODB_URI`: Your MongoDB Atlas connection URI.
-   - `JWT_SECRET`: A secure random string for signing JWT tokens.
-   - `PORT`: `5050` (or leave default).
-4. Click **Run**. Replit will run `npm start` and serve your live video conferencing application at your public Replit URL!
-
----
 
 ## License
 
