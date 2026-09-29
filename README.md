@@ -4,6 +4,12 @@ VidCon is a modern, high-performance video conferencing application built with R
 
 ---
 
+### 🌐 Live Demo
+Access the live deployed application here:  
+👉 **[https://video-conference-webapp-nsrp.onrender.com/dashboard](https://video-conference-webapp-nsrp.onrender.com/dashboard)**
+
+---
+
 ## Key Features
 
 - **HD Video & Audio:** Low-latency WebRTC peer-to-peer audio and video calls.
