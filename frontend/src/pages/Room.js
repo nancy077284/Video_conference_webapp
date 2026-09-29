@@ -45,7 +45,77 @@ const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
   ],
+};
+
+const RemoteVideoItem = ({ p, stream, handRaised }) => {
+  const videoRef = useRef(null);
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+    }
+  }, [stream]);
+
+  return (
+    <Paper
+      elevation={0}
+      sx={{
+        position: 'relative',
+        bgcolor: '#0d1322',
+        borderRadius: '20px',
+        overflow: 'hidden',
+        aspectRatio: '16/9',
+        border: '1px solid rgba(255, 255, 255, 0.1)',
+        boxShadow: '0 12px 30px rgba(0, 0, 0, 0.6)',
+      }}
+    >
+      <video
+        ref={videoRef}
+        id={`remote-${p.socketId}`}
+        autoPlay
+        playsInline
+        style={{
+          width: '100%',
+          height: '100%',
+          objectFit: 'cover',
+        }}
+      />
+      <Box sx={{ position: 'absolute', bottom: 12, left: 12, display: 'flex', gap: 1 }}>
+        <Chip
+          label={p.userName || 'Participant'}
+          size="small"
+          sx={{
+            bgcolor: 'rgba(10, 14, 26, 0.75)',
+            backdropFilter: 'blur(10px)',
+            color: '#ffffff',
+            fontWeight: 700,
+            fontSize: '0.75rem',
+            border: '1px solid rgba(255, 255, 255, 0.12)',
+          }}
+        />
+      </Box>
+      {handRaised && (
+        <Box
+          sx={{
+            position: 'absolute',
+            top: 12,
+            right: 12,
+            p: 0.8,
+            borderRadius: '12px',
+            bgcolor: 'rgba(245, 158, 11, 0.25)',
+            border: '1px solid rgba(245, 158, 11, 0.5)',
+            backdropFilter: 'blur(10px)',
+          }}
+        >
+          <PanToolIcon sx={{ color: '#fbbf24', fontSize: 24 }} />
+        </Box>
+      )}
+    </Paper>
+  );
 };
 
 const formatTime = (seconds) => {
@@ -66,6 +136,7 @@ const Room = () => {
   const [screenSharing, setScreenSharing] = useState(false);
   const [handRaised, setHandRaised] = useState(false);
   const [participants, setParticipants] = useState([]);
+  const [remoteStreams, setRemoteStreams] = useState({});
   const [chatOpen, setChatOpen] = useState(false);
   const [participantsOpen, setParticipantsOpen] = useState(false);
   const [messages, setMessages] = useState([]);
@@ -161,17 +232,40 @@ const Room = () => {
           localVideoRef.current.srcObject = stream;
         }
 
+        const token = localStorage.getItem('token');
         const socketServer = window.location.port === '3000'
           ? 'http://localhost:5001'
           : window.location.origin;
-        socketRef.current = io(socketServer);
+        socketRef.current = io(socketServer, {
+          auth: { token, user: { id: user?._id || user?.id, name: user?.name } },
+          query: { token, userId: user?._id || user?.id, userName: user?.name },
+          transports: ['websocket', 'polling'],
+          reconnection: true,
+        });
         const sock = socketRef.current;
+        const currentUserId = user?._id || user?.id || ('user-' + Math.random().toString(36).slice(2, 8));
+        const currentUserName = user?.name || 'Participant';
 
         sock.emit('join-room', {
           roomId: meetingId,
-          userId: user.id,
-          userName: user.name,
+          userId: currentUserId,
+          userName: currentUserName,
         });
+
+        const pendingCandidates = {};
+        const processQueuedCandidates = async (peerId, pc) => {
+          if (pendingCandidates[peerId] && pc && pc.remoteDescription) {
+            const queue = [...pendingCandidates[peerId]];
+            delete pendingCandidates[peerId];
+            for (const cand of queue) {
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(cand));
+              } catch (e) {
+                console.warn('Error applying queued ICE candidate:', e);
+              }
+            }
+          }
+        };
 
         sock.on('room:ended', ({ reason } = {}) => {
           toast.info(reason || 'The host has ended this meeting.');
@@ -209,6 +303,7 @@ const Room = () => {
           if (!pc) pc = createPC(from);
           try {
             await pc.setRemoteDescription(new RTCSessionDescription(offer));
+            await processQueuedCandidates(from, pc);
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             sock.emit('answer', { to: from, answer, from: sock.id });
@@ -222,6 +317,7 @@ const Room = () => {
           if (pc && pc.signalingState === 'have-local-offer') {
             try {
               await pc.setRemoteDescription(new RTCSessionDescription(answer));
+              await processQueuedCandidates(from, pc);
             } catch (err) {
               console.error('Error setting answer:', err);
             }
@@ -230,12 +326,15 @@ const Room = () => {
 
         sock.on('ice-candidate', async ({ candidate, from }) => {
           const pc = peerConnections[from];
-          if (pc && pc.remoteDescription) {
+          if (pc && pc.remoteDescription && pc.remoteDescription.type) {
             try {
               await pc.addIceCandidate(new RTCIceCandidate(candidate));
             } catch (e) {
               console.error('Error adding ICE candidate:', e);
             }
+          } else {
+            if (!pendingCandidates[from]) pendingCandidates[from] = [];
+            pendingCandidates[from].push(candidate);
           }
         });
 
@@ -247,6 +346,11 @@ const Room = () => {
           const el = document.getElementById(`remote-${socketId}`);
           if (el) el.srcObject = null;
           setParticipants((prev) => prev.filter((p) => p.socketId !== socketId));
+          setRemoteStreams((prev) => {
+            const next = { ...prev };
+            delete next[socketId];
+            return next;
+          });
           setRemoteHandRaised((prev) => {
             const next = { ...prev };
             delete next[socketId];
@@ -307,7 +411,9 @@ const Room = () => {
           };
 
           pc.ontrack = (event) => {
-            updateRemoteVideo(socketId, event.streams[0]);
+            const stream = event.streams[0];
+            setRemoteStreams((prev) => ({ ...prev, [socketId]: stream }));
+            updateRemoteVideo(socketId, stream);
           };
 
           pc.onconnectionstatechange = () => {
@@ -707,60 +813,12 @@ const Room = () => {
 
             {/* Remote Participants */}
             {participants.map((p) => (
-              <Paper
+              <RemoteVideoItem
                 key={p.socketId}
-                elevation={0}
-                sx={{
-                  position: 'relative',
-                  bgcolor: '#0d1322',
-                  borderRadius: '20px',
-                  overflow: 'hidden',
-                  aspectRatio: '16/9',
-                  border: '1px solid rgba(255, 255, 255, 0.1)',
-                  boxShadow: '0 12px 30px rgba(0, 0, 0, 0.6)',
-                }}
-              >
-                <video
-                  id={`remote-${p.socketId}`}
-                  autoPlay
-                  playsInline
-                  style={{
-                    width: '100%',
-                    height: '100%',
-                    objectFit: 'cover',
-                  }}
-                />
-                <Box sx={{ position: 'absolute', bottom: 12, left: 12, display: 'flex', gap: 1 }}>
-                  <Chip
-                    label={p.userName}
-                    size="small"
-                    sx={{
-                      bgcolor: 'rgba(10, 14, 26, 0.75)',
-                      backdropFilter: 'blur(10px)',
-                      color: '#ffffff',
-                      fontWeight: 700,
-                      fontSize: '0.75rem',
-                      border: '1px solid rgba(255, 255, 255, 0.12)',
-                    }}
-                  />
-                </Box>
-                {remoteHandRaised[p.socketId] && (
-                  <Box
-                    sx={{
-                      position: 'absolute',
-                      top: 12,
-                      right: 12,
-                      p: 0.8,
-                      borderRadius: '12px',
-                      bgcolor: 'rgba(245, 158, 11, 0.25)',
-                      border: '1px solid rgba(245, 158, 11, 0.5)',
-                      backdropFilter: 'blur(10px)',
-                    }}
-                  >
-                    <PanToolIcon sx={{ color: '#fbbf24', fontSize: 24 }} />
-                  </Box>
-                )}
-              </Paper>
+                p={p}
+                stream={remoteStreams[p.socketId]}
+                handRaised={remoteHandRaised[p.socketId]}
+              />
             ))}
           </Box>
         </Box>

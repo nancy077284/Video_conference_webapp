@@ -82,8 +82,9 @@ const Dashboard = () => {
     const match = code.match(/([a-zA-Z0-9-]{4,32})\s*$/);
     const normalized = match ? match[1] : code;
     try {
-      await api.joinMeeting(normalized);
-      navigate(`/join/${normalized}`);
+      await api.joinMeeting(normalized).catch(() => {});
+      setJoinOpen(false);
+      navigate(`/room/${normalized}`);
     } catch (err) {
       setJoinError(err?.message || 'Meeting not found');
     }

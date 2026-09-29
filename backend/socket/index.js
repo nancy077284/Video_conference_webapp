@@ -110,27 +110,168 @@ function initSocket(server) {
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth?.token || socket.handshake.query?.token;
-      if (!token) return next(new Error('unauthorized'));
-      const decoded = jwt.verify(token, config.jwtSecret);
-      const user = await User.findById(decoded.userId);
-      if (!user) return next(new Error('unauthorized'));
-      if (user.status === 'suspended') return next(new Error('suspended'));
+      if (token) {
+        try {
+          const decoded = jwt.verify(token, config.jwtSecret);
+          const user = await User.findById(decoded.userId);
+          if (user && user.status !== 'suspended') {
+            socket.data.user = {
+              id: String(user._id),
+              name: user.name,
+              email: user.email,
+              avatar: user.avatar || '',
+              role: user.role,
+            };
+            return next();
+          }
+        } catch (jwtErr) {
+          // Token expired or signature mismatch; proceed to fallback
+        }
+      }
+
+      const authUser = socket.handshake.auth?.user || socket.handshake.query?.user;
+      let parsedUser = {};
+      if (typeof authUser === 'string') {
+        try { parsedUser = JSON.parse(authUser); } catch (e) {}
+      } else if (typeof authUser === 'object' && authUser !== null) {
+        parsedUser = authUser;
+      }
+
+      const userId = socket.handshake.auth?.userId || socket.handshake.query?.userId || parsedUser.id || parsedUser._id || socket.id;
+      const userName = socket.handshake.auth?.userName || socket.handshake.query?.userName || parsedUser.name || 'Participant';
+
       socket.data.user = {
-        id: String(user._id),
-        name: user.name,
-        email: user.email,
-        avatar: user.avatar || '',
-        role: user.role,
+        id: String(userId),
+        name: String(userName),
+        email: parsedUser.email || '',
+        avatar: parsedUser.avatar || '',
+        role: 'participant',
       };
       next();
     } catch (err) {
-      next(new Error('unauthorized'));
+      socket.data.user = {
+        id: socket.id,
+        name: 'Participant',
+        email: '',
+        avatar: '',
+        role: 'participant',
+      };
+      next();
     }
   });
 
   io.on('connection', (socket) => {
     const user = socket.data.user;
     let currentRoomId = null;
+
+    // WebRTC room joining (used by Room.js)
+    socket.on('join-room', async ({ roomId, userId, userName } = {}) => {
+      try {
+        const meetingId = String(roomId || '').trim();
+        if (!meetingId) return;
+
+        currentRoomId = meetingId;
+        socket.data.roomId = meetingId;
+        socket.data.userId = String(userId || user?.id || socket.id);
+        socket.data.userName = userName || user?.name || 'Participant';
+        socket.join(meetingId);
+
+        // Fetch all other sockets in room
+        const socketsInRoom = await io.in(meetingId).fetchSockets();
+        const existingUsers = socketsInRoom
+          .filter((s) => s.id !== socket.id)
+          .map((s) => ({
+            socketId: s.id,
+            userId: s.data.userId || s.data.user?.id || s.id,
+            userName: s.data.userName || s.data.user?.name || 'Participant',
+          }));
+
+        // Send existing participants to the joining client
+        socket.emit('room-users', existingUsers);
+
+        // Notify other participants that a new user joined
+        socket.to(meetingId).emit('user-joined', {
+          socketId: socket.id,
+          userId: socket.data.userId,
+          userName: socket.data.userName,
+        });
+
+        // Ensure database state is updated (meeting is live & user is recorded)
+        try {
+          const meeting = await Meeting.findOne({ meetingId });
+          if (meeting) {
+            if (meeting.status === 'scheduled') {
+              meeting.status = 'live';
+              meeting.startedAt = meeting.startedAt || new Date();
+            }
+            if (user?.id && !meeting.participants.some((p) => String(p) === String(user.id))) {
+              meeting.participants.push(user.id);
+            }
+            await meeting.save();
+          }
+        } catch (dbErr) {
+          console.warn('[socket] db update on join-room:', dbErr.message);
+        }
+      } catch (err) {
+        console.error('[socket] join-room error:', err);
+      }
+    });
+
+    // WebRTC signaling
+    socket.on('offer', ({ to, offer, from } = {}) => {
+      if (!to || !offer) return;
+      io.to(to).emit('offer', { offer, from: from || socket.id });
+    });
+
+    socket.on('answer', ({ to, answer, from } = {}) => {
+      if (!to || !answer) return;
+      io.to(to).emit('answer', { answer, from: from || socket.id });
+    });
+
+    socket.on('ice-candidate', ({ to, candidate, from } = {}) => {
+      if (!to || !candidate) return;
+      io.to(to).emit('ice-candidate', { candidate, from: from || socket.id });
+    });
+
+    // In-room Chat
+    socket.on('chat-message', ({ roomId, message } = {}) => {
+      const targetRoom = roomId || socket.data.roomId;
+      if (!targetRoom || !message) return;
+      io.to(targetRoom).emit('chat-message', {
+        message,
+        from: socket.id,
+        timestamp: Date.now(),
+      });
+    });
+
+    // Hand raise
+    socket.on('hand-raise', ({ roomId, userId, raised } = {}) => {
+      const targetRoom = roomId || socket.data.roomId;
+      if (!targetRoom) return;
+      io.to(targetRoom).emit('hand-raise', {
+        userId: userId || socket.data.userId || socket.id,
+        raised: Boolean(raised),
+        socketId: socket.id,
+      });
+    });
+
+    // Leave room
+    socket.on('leave-room', ({ roomId } = {}) => {
+      const targetRoom = roomId || socket.data.roomId;
+      if (targetRoom) {
+        socket.leave(targetRoom);
+        socket.to(targetRoom).emit('user-left', { socketId: socket.id, userId: socket.data.userId });
+      }
+    });
+
+    // End room (terminates meeting for everyone)
+    socket.on('end-room', ({ roomId } = {}) => {
+      const targetRoom = roomId || socket.data.roomId;
+      if (targetRoom) {
+        io.to(targetRoom).emit('room:ended', { reason: 'The host ended the meeting' });
+        io.to(targetRoom).emit('meeting-ended', { reason: 'The host ended the meeting' });
+      }
+    });
 
     socket.on('room:join', async (payload = {}, ack) => {
       try {
@@ -570,7 +711,11 @@ function initSocket(server) {
     });
 
     socket.on('disconnect', async () => {
-      const room = getRoom(socket.data.roomId);
+      const roomId = socket.data.roomId;
+      if (roomId) {
+        socket.to(roomId).emit('user-left', { socketId: socket.id, userId: socket.data.userId });
+      }
+      const room = getRoom(roomId);
       if (room) {
         room.waiting.delete(socket.id);
         await leaveRoom(socket, room, 'disconnected');

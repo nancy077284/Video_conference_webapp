@@ -148,7 +148,7 @@ const ThemedRoutes = () => {
             element={
               <PrivateRoute>
                 <Suspense fallback={<Loading />}>
-                  <PreJoin mode="join" />
+                  <Room />
                 </Suspense>
               </PrivateRoute>
             }

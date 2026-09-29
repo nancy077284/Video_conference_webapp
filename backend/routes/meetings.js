@@ -239,12 +239,7 @@ router.get('/:meetingId', auth, async (req, res, next) => {
     const isHost = service.isHostOf(meeting, userId);
     const isAdmin = req.user.role === 'admin';
     const invited = (meeting.invitees || []).some((i) => String(i.user || '') === String(userId));
-    const joined = service.hasJoined(meeting, userId);
-
-    if (!isHost && !isAdmin && !invited && !joined && meeting.status === 'scheduled') {
-      throw ApiError.forbidden('You are not invited to this meeting');
-    }
-
+    // Any authenticated user who has the meeting ID/link can view and join
     const canManage = isHost || isAdmin;
     const payload = meeting.toPublic({ forUser: userId });
     if (canManage) payload.waiting = meeting.waiting;
